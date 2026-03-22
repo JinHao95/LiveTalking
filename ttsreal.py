@@ -23,6 +23,7 @@ import asyncio
 import edge_tts
 
 import os
+import re
 import hmac
 import hashlib
 import base64
@@ -986,3 +987,176 @@ class AzureTTS(BaseTTS):
             frame = (np.frombuffer(chunk, dtype=np.int16)
                        .astype(np.float32) / 32767.0)
             self.parent.put_audio_frame(frame)
+###########################################################################################
+class SeedTTS(BaseTTS):
+    """
+    豆包 Seed-TTS 2.0 语音合成
+    使用 HTTP Chunk 单向流接口（v3），逐块返回 PCM 音频
+    配置项（来自 runtime_config.json）：
+        seed_tts_appid    - 火山引擎 App ID
+        seed_tts_token    - 火山引擎 Access Token
+        seed_tts_voice    - 音色 ID，如 zh_female_qingxin_moon_bigtts
+        seed_tts_model    - 模型，默认 seed-tts-2.0
+        seed_tts_speed    - 语速，[-50, 100]，默认 0
+        seed_tts_volume   - 音量，[-50, 100]，默认 0
+    """
+
+    _RUNTIME_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'runtime_config.json')
+    _API_URL = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
+    _TTS_SAMPLE_RATE = 24000  # Seed-TTS 输出采样率
+
+    def _load_cfg(self) -> dict:
+        cfg = {}
+        if os.path.exists(self._RUNTIME_CONFIG_FILE):
+            with open(self._RUNTIME_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+        return cfg
+
+    # 控制指令维度映射表
+    _SPEED_MAP  = {'fast': 30, 'normal': 0, 'slow': -30}
+    _VOLUME_MAP = {'loud': 30, 'normal': 0, 'soft': -30}
+    _EMOTION_MAP = {
+        'enthusiastic': 'enthusiastic', 'gentle': 'gentle',
+        'urgent': 'urgent', 'calm': 'calm', 'playful': 'playful',
+    }
+
+    @staticmethod
+    def _parse_cmd(tag: str) -> dict:
+        """解析 [emotion-speed-pitch-volume] 格式，返回 API 参数 dict"""
+        parts = [p.strip() for p in tag.split('-')]
+        result = {}
+        if len(parts) >= 1 and parts[0] in SeedTTS._EMOTION_MAP:
+            result['emotion'] = SeedTTS._EMOTION_MAP[parts[0]]
+        if len(parts) >= 2:
+            result['speed_delta'] = SeedTTS._SPEED_MAP.get(parts[1], 0)
+        if len(parts) >= 4:
+            result['volume_delta'] = SeedTTS._VOLUME_MAP.get(parts[3], 0)
+        return result
+
+    def _seed_tts_stream(self, text: str, cmd: dict = {}) -> Iterator[bytes]:
+        """调用 Seed-TTS HTTP Chunk 接口，流式返回 PCM bytes"""
+        cfg = self._load_cfg()
+        appid   = cfg.get('seed_tts_appid', '')
+        token   = cfg.get('seed_tts_token', '')
+        voice   = cfg.get('seed_tts_voice', 'zh_female_qingxin_moon_bigtts')
+        model   = cfg.get('seed_tts_model', 'seed-tts-2.0')
+        speed   = int(cfg.get('seed_tts_speed', 0))
+        volume  = int(cfg.get('seed_tts_volume', 0))
+
+        if not appid or not token:
+            logger.error('[SeedTTS] 未配置 seed_tts_appid 或 seed_tts_token，请在配置面板填写')
+            return
+
+        headers = {
+            'X-Api-App-Id':      appid,
+            'X-Api-Access-Key':  token,
+            'X-Api-Resource-Id': model,
+            'Content-Type':      'application/json',
+        }
+        req_params = {
+            'text':   text,
+            'speaker': voice,
+            'audio_params': {
+                'format':       'pcm',
+                'sample_rate':  self._TTS_SAMPLE_RATE,
+                'speech_rate':  speed + cmd.get('speed_delta', 0),
+                'loudness_rate': volume + cmd.get('volume_delta', 0),
+            },
+        }
+        if cmd.get('emotion'):
+            req_params['emotion'] = cmd['emotion']
+            logger.info(f'[SeedTTS] emotion={cmd["emotion"]} speed_delta={cmd.get("speed_delta",0)} volume_delta={cmd.get("volume_delta",0)}')
+        payload = {'req_params': req_params}
+
+        start = time.perf_counter()
+        try:
+            resp = requests.post(
+                self._API_URL,
+                headers=headers,
+                json=payload,
+                stream=True,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            first = True
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                try:
+                    chunk_json = json.loads(line)
+                except Exception:
+                    continue
+                code = chunk_json.get('code', -1)
+                if code == 0:
+                    data = chunk_json.get('data')
+                    if data:
+                        if first:
+                            logger.info(f'[SeedTTS] 首帧延迟: {time.perf_counter()-start:.3f}s')
+                            first = False
+                        yield base64.b64decode(data)
+                elif code == 20000000:
+                    logger.info(f'[SeedTTS] 合成完成，总耗时: {time.perf_counter()-start:.3f}s')
+                    break
+                else:
+                    logger.error(f'[SeedTTS] 错误: code={code}, msg={chunk_json.get("message")}')
+                    break
+        except Exception:
+            logger.exception('[SeedTTS] 请求异常')
+
+    def txt_to_audio(self, msg: tuple[str, dict]):
+        text, textevent = msg
+        # 提取 [emotion-speed-pitch-volume] 控制指令，正文去掉标签
+        tag_match = re.match(r'^\[([^\[\]]+)\]\s*', text)
+        cmd = {}
+        if tag_match:
+            cmd = self._parse_cmd(tag_match.group(1))
+            text = text[tag_match.end():]
+            logger.info(f'[SeedTTS] 解析指令: {tag_match.group(1)!r} → {cmd}')
+        text = re.sub(r'\[.*?\]', '', text).strip()  # 去掉剩余标签
+        if not text:
+            logger.info('[SeedTTS] 文本为空，跳过')
+            return
+        logger.info(f'[SeedTTS] >>> 合成文本: {text!r}')
+        # 先收集全部 PCM 再一次性重采样，避免逐块 resample 产生边界断音
+        raw_chunks = []
+        for pcm_bytes in self._seed_tts_stream(text, cmd=cmd):
+            if not pcm_bytes or self.state != State.RUNNING:
+                break
+            raw_chunks.append(pcm_bytes)
+
+        if not raw_chunks:
+            logger.warning(f"[SeedTTS] 未收到任何 PCM 数据（API 失败？）")
+            eventpoint = {'status': 'end', 'text': text}
+            eventpoint.update(**textevent)
+            self.parent.put_audio_frame(np.zeros(self.chunk, np.float32), eventpoint)
+            return
+
+        all_pcm = b''.join(raw_chunks)
+        logger.info(f"[SeedTTS] 收到 PCM: {len(all_pcm)} bytes ({len(all_pcm)//2/self._TTS_SAMPLE_RATE:.2f}s @ 24kHz)")
+        stream = np.frombuffer(all_pcm, dtype=np.int16).astype(np.float32) / 32767.0
+        if self._TTS_SAMPLE_RATE != self.sample_rate:
+            stream = resampy.resample(x=stream, sr_orig=self._TTS_SAMPLE_RATE, sr_new=self.sample_rate)
+
+        total_frames = stream.shape[0] // self.chunk
+        logger.info(f"[SeedTTS] 重采样后: {stream.shape[0]} samples → 发送 {total_frames} 帧到 MuseTalk")
+        streamlen = stream.shape[0]
+        idx = 0
+        first = True
+        while streamlen >= self.chunk and self.state == State.RUNNING:
+            eventpoint = {}
+            if first:
+                eventpoint = {'status': 'start', 'text': text}
+                eventpoint.update(**textevent)
+                first = False
+            elif streamlen < self.chunk * 2:
+                eventpoint = {'status': 'end', 'text': text}
+                eventpoint.update(**textevent)
+            self.parent.put_audio_frame(stream[idx:idx + self.chunk], eventpoint)
+            streamlen -= self.chunk
+            idx += self.chunk
+
+        # 发一帧静音作为结束信号
+        eventpoint = {'status': 'end', 'text': text}
+        eventpoint.update(**textevent)
+        self.parent.put_audio_frame(np.zeros(self.chunk, np.float32), eventpoint)
+        logger.info(f"[SeedTTS] <<< 合成完成: {text!r}")

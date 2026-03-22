@@ -48,7 +48,11 @@ function start() {
     };
 
     if (document.getElementById('use-stun').checked) {
-        config.iceServers = [{ urls: ['stun:stun.l.google.com:19302'] }];
+        config.iceServers = [{
+            urls: 'turn:172.18.140.100:5401?transport=tcp',
+            username: 'livetalking',
+            credential: 'livetalking123'
+        }];
     }
 
     pc = new RTCPeerConnection(config);

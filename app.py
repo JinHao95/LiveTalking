@@ -47,6 +47,34 @@ import torch
 from typing import Dict
 from logger import logger
 import gc
+import collections
+import logging
+
+# ── 前端日志广播 ──────────────────────────────────────────────
+_LOG_BUF: collections.deque = collections.deque(maxlen=200)   # 最近200条
+_LOG_SUBSCRIBERS: list = []                                    # SSE 客户端队列列表
+
+class _FrontendLogHandler(logging.Handler):
+    """把 logger 的输出同步转发给前端 SSE 订阅者"""
+    def emit(self, record):
+        msg = self.format(record)
+        _LOG_BUF.append(msg)
+        dead = []
+        for q in _LOG_SUBSCRIBERS:
+            try:
+                q.put_nowait(msg)
+            except Exception:
+                dead.append(q)
+        for q in dead:
+            try:
+                _LOG_SUBSCRIBERS.remove(q)
+            except ValueError:
+                pass
+
+_fh = _FrontendLogHandler()
+_fh.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'))
+logging.getLogger('logger').addHandler(_fh)
+# ─────────────────────────────────────────────────────────────
 
 
 app = Flask(__name__)
@@ -63,7 +91,15 @@ _DEFAULT_RUNTIME_CONFIG = {
     "llm_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "llm_model": "qwen-plus",
     "system_prompt": "你是一个友善的AI助手。",
+    "enable_emotion_tag": False,
     "tts_voice": "zh-CN-YunxiaNeural",
+    # Seed-TTS 专用配置
+    "seed_tts_appid": "",
+    "seed_tts_token": "",
+    "seed_tts_voice": "zh_female_qingxin_moon_bigtts",
+    "seed_tts_model": "seed-tts-2.0",
+    "seed_tts_speed": 0,
+    "seed_tts_volume": 0,
 }
 
 def load_runtime_config() -> dict:
@@ -177,8 +213,10 @@ async def human(request):
             nerfreals[sessionid].flush_talk()
 
         if params['type']=='echo':
+            logger.info(f"[Human] echo: {params['text']!r}")
             nerfreals[sessionid].put_msg_txt(params['text'])
         elif params['type']=='chat':
+            logger.info(f"[Human] 收到用户消息 (session={sessionid}): {params['text']!r}")
             asyncio.get_event_loop().run_in_executor(None, llm_response, params['text'],nerfreals[sessionid])                         
             #nerfreals[sessionid].put_msg_txt(res)
 
@@ -290,6 +328,38 @@ async def record(request):
             ),
         )
 
+async def log_stream(request):
+    """SSE 接口：实时推送后端日志到前端"""
+    import asyncio as _asyncio
+    resp = web.StreamResponse(headers={
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',
+    })
+    await resp.prepare(request)
+
+    # 先把缓冲里的历史日志发送一遍
+    for line in list(_LOG_BUF):
+        await resp.write(f"data: {line}\n\n".encode())
+
+    q = asyncio.Queue()
+    _LOG_SUBSCRIBERS.append(q)
+    try:
+        while True:
+            try:
+                msg = await _asyncio.wait_for(q.get(), timeout=15)
+                await resp.write(f"data: {msg}\n\n".encode())
+            except _asyncio.TimeoutError:
+                await resp.write(b": heartbeat\n\n")  # 保持连接
+    except Exception:
+        pass
+    finally:
+        try:
+            _LOG_SUBSCRIBERS.remove(q)
+        except ValueError:
+            pass
+    return resp
+
 async def get_config(request):
     cfg = load_runtime_config()
     # 用环境变量补 api_key（首次未配置时）
@@ -309,7 +379,15 @@ async def get_config(request):
             "llm_base_url": cfg["llm_base_url"],
             "llm_model": cfg["llm_model"],
             "system_prompt": cfg["system_prompt"],
+            "enable_emotion_tag": cfg.get("enable_emotion_tag", False),
             "tts_voice": cfg["tts_voice"],
+            # Seed-TTS
+            "seed_tts_appid": cfg.get("seed_tts_appid", ""),
+            "seed_tts_token_set": bool(cfg.get("seed_tts_token")),
+            "seed_tts_voice": cfg.get("seed_tts_voice", "zh_female_qingxin_moon_bigtts"),
+            "seed_tts_model": cfg.get("seed_tts_model", "seed-tts-2.0"),
+            "seed_tts_speed": cfg.get("seed_tts_speed", 0),
+            "seed_tts_volume": cfg.get("seed_tts_volume", 0),
         }, ensure_ascii=False),
     )
 
@@ -317,7 +395,10 @@ async def post_config(request):
     try:
         params = await request.json()
         cfg = load_runtime_config()
-        for key in ["llm_api_key", "llm_base_url", "llm_model", "system_prompt", "tts_voice"]:
+        for key in ["llm_api_key", "llm_base_url", "llm_model", "system_prompt",
+                    "enable_emotion_tag", "tts_voice",
+                    "seed_tts_appid", "seed_tts_token", "seed_tts_voice",
+                    "seed_tts_model", "seed_tts_speed", "seed_tts_volume"]:
             if key in params:
                 cfg[key] = params[key]
         save_runtime_config(cfg)
@@ -330,6 +411,72 @@ async def post_config(request):
         )
     except Exception as e:
         logger.exception('post_config exception:')
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": -1, "msg": str(e)}),
+        )
+
+async def tts_preview(request):
+    """试听接口：用指定音色合成一段示例文字，返回 mp3 音频"""
+    try:
+        params = await request.json()
+        voice   = params.get('voice', 'zh_female_qingxin_moon_bigtts')
+        model   = params.get('model', 'seed-tts-2.0')
+        text    = params.get('text', '你好，我是你的数字人主播，很高兴认识你！')
+        cfg     = load_runtime_config()
+        appid   = cfg.get('seed_tts_appid', '')
+        token   = cfg.get('seed_tts_token', '')
+
+        if not appid or not token:
+            return web.Response(
+                content_type="application/json",
+                text=json.dumps({"code": -1, "msg": "请先在配置面板填写 Seed-TTS 的 App ID 和 Token"}, ensure_ascii=False)
+            )
+
+        import requests as _req, base64 as _b64
+        headers = {
+            'X-Api-App-Id':      appid,
+            'X-Api-Access-Key':  token,
+            'X-Api-Resource-Id': model,
+            'Content-Type':      'application/json',
+        }
+        payload = {
+            'req_params': {
+                'text': text,
+                'speaker': voice,
+                'audio_params': {'format': 'mp3', 'sample_rate': 24000},
+            }
+        }
+        resp = _req.post(
+            'https://openspeech.bytedance.com/api/v3/tts/unidirectional',
+            headers=headers, json=payload, stream=True, timeout=15
+        )
+        resp.raise_for_status()
+        audio = b''
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            try:
+                c = json.loads(line)
+            except Exception:
+                continue
+            if c.get('code') == 0 and c.get('data'):
+                audio += _b64.b64decode(c['data'])
+            elif c.get('code') == 20000000:
+                break
+            elif c.get('code', 0) not in (0, 20000000):
+                return web.Response(
+                    content_type="application/json",
+                    text=json.dumps({"code": -1, "msg": c.get('message', '合成失败')}, ensure_ascii=False)
+                )
+
+        return web.Response(
+            content_type="audio/mpeg",
+            headers={"Content-Disposition": "inline"},
+            body=audio,
+        )
+    except Exception as e:
+        logger.exception('tts_preview exception:')
         return web.Response(
             content_type="application/json",
             text=json.dumps({"code": -1, "msg": str(e)}),
@@ -475,6 +622,8 @@ if __name__ == '__main__':
     appasync.router.add_post("/is_speaking", is_speaking)
     appasync.router.add_get("/config", get_config)
     appasync.router.add_post("/config", post_config)
+    appasync.router.add_post("/tts_preview", tts_preview)
+    appasync.router.add_get("/logs", log_stream)
     appasync.router.add_static('/',path='web')
 
     # Configure default CORS settings.

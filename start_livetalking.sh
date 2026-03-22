@@ -16,5 +16,6 @@ python app.py \
     --transport webrtc \
     --model musetalk \
     --avatar_id xiaoqing \
+    --tts seedtts \
     --listenport 5402 \
     "$@"
