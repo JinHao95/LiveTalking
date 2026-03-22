@@ -39,6 +39,7 @@ from basereal import BaseReal
 from llm import llm_response
 
 import argparse
+import os
 import random
 import shutil
 import asyncio
@@ -54,6 +55,29 @@ nerfreals:Dict[int, BaseReal] = {} #sessionid:BaseReal
 opt = None
 model = None
 avatar = None
+
+# 运行时可热更新的配置
+_RUNTIME_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'runtime_config.json')
+_DEFAULT_RUNTIME_CONFIG = {
+    "llm_api_key": "",
+    "llm_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "llm_model": "qwen-plus",
+    "system_prompt": "你是一个友善的AI助手。",
+    "tts_voice": "zh-CN-YunxiaNeural",
+}
+
+def load_runtime_config() -> dict:
+    if os.path.exists(_RUNTIME_CONFIG_FILE):
+        with open(_RUNTIME_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        cfg = dict(_DEFAULT_RUNTIME_CONFIG)
+        cfg.update(data)
+        return cfg
+    return dict(_DEFAULT_RUNTIME_CONFIG)
+
+def save_runtime_config(cfg: dict):
+    with open(_RUNTIME_CONFIG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
         
 
 #####webrtc###############################
@@ -100,8 +124,11 @@ async def offer(request):
     nerfreal = await asyncio.get_event_loop().run_in_executor(None, build_nerfreal,sessionid)
     nerfreals[sessionid] = nerfreal
     
-    #ice_server = RTCIceServer(urls='stun:stun.l.google.com:19302')
-    ice_server = RTCIceServer(urls='stun:stun.freeswitch.org:3478')
+    ice_server = RTCIceServer(
+        urls='turn:172.18.140.100:5401?transport=tcp',
+        username='livetalking',
+        credential='livetalking123'
+    )
     pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=[ice_server]))
     pcs.add(pc)
 
@@ -263,6 +290,51 @@ async def record(request):
             ),
         )
 
+async def get_config(request):
+    cfg = load_runtime_config()
+    # 用环境变量补 api_key（首次未配置时）
+    if not cfg.get("llm_api_key"):
+        cfg["llm_api_key"] = os.getenv("DASHSCOPE_API_KEY", "")
+    return web.Response(
+        content_type="application/json",
+        text=json.dumps({
+            # 启动时固定参数（只读）
+            "model": opt.model,
+            "avatar_id": opt.avatar_id,
+            "tts": opt.tts,
+            "transport": opt.transport,
+            "listenport": opt.listenport,
+            # 运行时可热更新参数
+            "llm_api_key": cfg["llm_api_key"],
+            "llm_base_url": cfg["llm_base_url"],
+            "llm_model": cfg["llm_model"],
+            "system_prompt": cfg["system_prompt"],
+            "tts_voice": cfg["tts_voice"],
+        }, ensure_ascii=False),
+    )
+
+async def post_config(request):
+    try:
+        params = await request.json()
+        cfg = load_runtime_config()
+        for key in ["llm_api_key", "llm_base_url", "llm_model", "system_prompt", "tts_voice"]:
+            if key in params:
+                cfg[key] = params[key]
+        save_runtime_config(cfg)
+        # 同步更新 tts_voice 到 opt（影响新连接）
+        if "tts_voice" in params:
+            opt.REF_FILE = params["tts_voice"]
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": 0, "msg": "ok"}, ensure_ascii=False),
+        )
+    except Exception as e:
+        logger.exception('post_config exception:')
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps({"code": -1, "msg": str(e)}),
+        )
+
 async def is_speaking(request):
     params = await request.json()
 
@@ -401,6 +473,8 @@ if __name__ == '__main__':
     appasync.router.add_post("/record", record)
     appasync.router.add_post("/interrupt_talk", interrupt_talk)
     appasync.router.add_post("/is_speaking", is_speaking)
+    appasync.router.add_get("/config", get_config)
+    appasync.router.add_post("/config", post_config)
     appasync.router.add_static('/',path='web')
 
     # Configure default CORS settings.

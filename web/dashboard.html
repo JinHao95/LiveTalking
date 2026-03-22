@@ -407,6 +407,25 @@
             </div>
         </div>
 
+        <!-- 当前配置信息 -->
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span><i class="bi bi-info-circle"></i> 当前系统配置</span>
+                        <button class="btn btn-sm btn-outline-light" id="btn-edit-config">
+                            <i class="bi bi-pencil"></i> 编辑
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div id="config-info" class="row">
+                            <div class="col-12 text-muted">加载中...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div class="footer">
             <p>Made with ❤️ by Marstaos | Frontend & Performance Optimization</p>
         </div>
@@ -415,6 +434,66 @@
     <!-- 隐藏的会话ID -->
     <input type="hidden" id="sessionid" value="0">
 
+
+<!-- 配置编辑模态框 -->
+<div class="modal fade" id="configModal" tabindex="-1" aria-labelledby="configModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header" style="background-color:#4361ee;color:white;">
+                <h5 class="modal-title" id="configModalLabel"><i class="bi bi-gear"></i> 运行时配置</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p class="text-muted small mb-3">以下配置立即生效，无需重启服务。渲染模型、Avatar、传输协议等启动参数需重启才能修改。</p>
+
+                <h6 class="fw-bold border-bottom pb-2 mb-3"><i class="bi bi-chat-dots text-primary"></i> LLM 配置</h6>
+                <div class="mb-3 row">
+                    <label class="col-sm-3 col-form-label">API Key</label>
+                    <div class="col-sm-9">
+                        <input type="password" class="form-control" id="cfg-llm-api-key" placeholder="sk-...">
+                    </div>
+                </div>
+                <div class="mb-3 row">
+                    <label class="col-sm-3 col-form-label">Base URL</label>
+                    <div class="col-sm-9">
+                        <input type="text" class="form-control" id="cfg-llm-base-url">
+                        <div class="form-text">OpenAI 兼容接口地址，如阿里云: https://dashscope.aliyuncs.com/compatible-mode/v1</div>
+                    </div>
+                </div>
+                <div class="mb-3 row">
+                    <label class="col-sm-3 col-form-label">模型名称</label>
+                    <div class="col-sm-9">
+                        <input type="text" class="form-control" id="cfg-llm-model" placeholder="qwen-plus">
+                        <div class="form-text">如: qwen-plus、gpt-4o、doubao-1-5-pro-32k-250115</div>
+                    </div>
+                </div>
+
+                <h6 class="fw-bold border-bottom pb-2 mb-3 mt-4"><i class="bi bi-person-video2 text-primary"></i> 主播人设</h6>
+                <div class="mb-3 row">
+                    <label class="col-sm-3 col-form-label">System Prompt</label>
+                    <div class="col-sm-9">
+                        <textarea class="form-control" id="cfg-system-prompt" rows="5" placeholder="你是一个直播间的虚拟主播..."></textarea>
+                        <div class="form-text">定义数字人的角色、性格和说话风格。每次对话都会以此作为系统指令。</div>
+                    </div>
+                </div>
+
+                <h6 class="fw-bold border-bottom pb-2 mb-3 mt-4"><i class="bi bi-volume-up text-primary"></i> TTS 配置</h6>
+                <div class="mb-3 row">
+                    <label class="col-sm-3 col-form-label">音色 / Voice ID</label>
+                    <div class="col-sm-9">
+                        <input type="text" class="form-control" id="cfg-tts-voice" placeholder="zh-CN-YunxiaNeural">
+                        <div class="form-text">EdgeTTS 音色列表: zh-CN-YunxiaNeural（女）、zh-CN-YunjianNeural（男）、zh-CN-XiaoxiaoNeural（女）</div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <span id="config-save-msg" class="text-success me-auto" style="display:none"><i class="bi bi-check-circle"></i> 保存成功</span>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="btn-save-config">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
 
     <script src="client.js"></script>
     <script src="srs.sdk.js"></script>
@@ -465,6 +544,83 @@
                 messagesContainer.append(messageElement);
                 messagesContainer.scrollTop(messagesContainer[0].scrollHeight);
             }
+
+            // 加载配置信息
+            let _currentConfig = {};
+            function loadConfig() {
+                fetch('/config').then(r => r.json()).then(function(cfg) {
+                    _currentConfig = cfg;
+                    const staticLabels = {
+                        model: ['渲染模型', 'bi-cpu'],
+                        avatar_id: ['数字人形象', 'bi-person-video2'],
+                        tts: ['TTS引擎', 'bi-volume-up'],
+                        transport: ['传输协议', 'bi-broadcast'],
+                        listenport: ['服务端口', 'bi-hdd-network'],
+                    };
+                    const dynamicLabels = {
+                        tts_voice: ['TTS音色', 'bi-mic'],
+                        llm_model: ['LLM模型', 'bi-chat-dots'],
+                    };
+                    let html = '';
+                    Object.entries({...staticLabels, ...dynamicLabels}).forEach(([k, [label, icon]]) => {
+                        const val = cfg[k] || '-';
+                        html += `<div class="col-md-3 col-sm-6 mb-2">
+                            <div class="d-flex align-items-center p-2 bg-light rounded">
+                                <i class="bi ${icon} me-2 text-primary"></i>
+                                <div>
+                                    <div style="font-size:11px;color:#6c757d">${label}</div>
+                                    <div style="font-weight:600;font-size:13px" title="${val}">${val.length > 20 ? val.slice(0,20)+'…' : val}</div>
+                                </div>
+                            </div>
+                        </div>`;
+                    });
+                    $('#config-info').html(html);
+                }).catch(function() {
+                    $('#config-info').html('<div class="col-12 text-danger">配置加载失败</div>');
+                });
+            }
+            loadConfig();
+
+            // 打开编辑模态框
+            $('#btn-edit-config').click(function() {
+                const cfg = _currentConfig;
+                $('#cfg-llm-api-key').val(cfg.llm_api_key || '');
+                $('#cfg-llm-base-url').val(cfg.llm_base_url || '');
+                $('#cfg-llm-model').val(cfg.llm_model || '');
+                $('#cfg-system-prompt').val(cfg.system_prompt || '');
+                $('#cfg-tts-voice').val(cfg.tts_voice || '');
+                $('#config-save-msg').hide();
+                new bootstrap.Modal(document.getElementById('configModal')).show();
+            });
+
+            // 保存配置
+            $('#btn-save-config').click(function() {
+                const payload = {
+                    llm_api_key: $('#cfg-llm-api-key').val().trim(),
+                    llm_base_url: $('#cfg-llm-base-url').val().trim(),
+                    llm_model: $('#cfg-llm-model').val().trim(),
+                    system_prompt: $('#cfg-system-prompt').val().trim(),
+                    tts_voice: $('#cfg-tts-voice').val().trim(),
+                };
+                $('#btn-save-config').prop('disabled', true).text('保存中...');
+                fetch('/config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload),
+                }).then(r => r.json()).then(function(res) {
+                    if (res.code === 0) {
+                        $('#config-save-msg').show();
+                        loadConfig();
+                        setTimeout(() => bootstrap.Modal.getInstance(document.getElementById('configModal')).hide(), 800);
+                    } else {
+                        alert('保存失败: ' + res.msg);
+                    }
+                }).catch(function(e) {
+                    alert('保存失败: ' + e);
+                }).finally(function() {
+                    $('#btn-save-config').prop('disabled', false).text('保存');
+                });
+            });
 
             // 开始/停止按钮
             $('#start').click(function() {
