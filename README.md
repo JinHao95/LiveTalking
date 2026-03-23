@@ -27,6 +27,84 @@
 6. 支持多并发
 7. 支持自定义数字人形象
 
+## 本地部署说明（JinHao95 定制版）
+
+本分支在原版 LiveTalking 基础上做了以下定制：
+- 集成豆包 Seed-TTS 2.0 语音合成（支持情感标签）
+- 集成豆包 LLM（doubao-1-5-pro-32k）
+- Dashboard 可视化配置面板（无需重启热更新）
+- TURN 服务器支持（解决 VPN/内网 WebRTC 连通问题）
+- 前端实时日志面板
+
+### 环境信息
+
+- Python 3.10.14（pyenv）
+- torch 2.2.2+cu121，numpy 1.26.4
+- Avatar：xiaoqing（MuseTalk v1.5 格式预处理）
+- 访问地址：http://172.18.140.100:5402/dashboard.html
+
+### 启动服务
+
+```bash
+cd /data/home/jiangjinghao/LiveTalking
+
+# 后台启动（自动写 PID 文件）
+bash start_livetalking.sh > livetalking.log 2>&1 &
+
+# 查看日志
+tail -f livetalking.log
+```
+
+启动完成后访问：http://172.18.140.100:5402/dashboard.html
+
+### 停止服务
+
+```bash
+bash stop_livetalking.sh
+```
+
+### Avatar 预处理（首次或更换形象时）
+
+需要使用 DigitalHuman 的 musetalk_venv（含 mmpose）：
+
+```bash
+cd /data/home/jiangjinghao/LiveTalking
+source /data/home/jiangjinghao/DigitalHuman/musetalk_venv/bin/activate
+
+PYTHONPATH=/data/home/jiangjinghao/LiveTalking \
+python musetalk/genavatar.py \
+    --file /path/to/avatar_video.mp4 \
+    --avatar_id your_avatar_id \
+    --version v15 \
+    --bbox_shift 0
+
+# 移动到正确路径
+mv musetalk/data/avatars/your_avatar_id data/avatars/your_avatar_id
+```
+
+### 配置
+
+所有运行时配置通过 Dashboard 页面的「编辑」按钮修改，保存后立即生效，无需重启。
+
+配置文件：`runtime_config.json`（已加入 .gitignore，不提交到 git）
+
+| 配置项 | 说明 |
+|--------|------|
+| LLM API Key / URL / 模型 | 豆包 LLM 接入配置 |
+| 主播人设 (system_prompt) | 数字人角色设定 |
+| 情感标签开关 | 开启后 LLM 自动输出情感指令，Seed-TTS 按情感合成语音 |
+| Seed-TTS AppID / Token | 豆包 TTS 鉴权 |
+| 音色选择 | 支持 seed-tts-2.0 / seed-tts-1.0 多种音色，含试听 |
+| 语速 / 音量 | -10 ~ +10 调节 |
+
+### TURN 服务器
+
+VPN 环境下 WebRTC UDP 不通，已配置 coturn TCP 中转：
+- 地址：172.18.140.100:5401（TCP）
+- 用户名/密码：livetalking / livetalking123
+
+---
+
 ## 1. Installation
 
 Tested on Ubuntu 24.04, Python3.10, Pytorch 2.5.0 and CUDA 12.4
