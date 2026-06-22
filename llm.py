@@ -5,6 +5,14 @@ import json
 from basereal import BaseReal
 from logger import logger
 
+# 延迟导入，避免循环依赖
+def _push_reply(user_text: str, ai_text: str):
+    try:
+        import app as _app
+        _app.push_chat_reply(user_text, ai_text)
+    except Exception:
+        pass
+
 _RUNTIME_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'runtime_config.json')
 _DEFAULT_CONFIG = {
     "llm_api_key": "",
@@ -121,6 +129,7 @@ def llm_response(message, nerfreal: BaseReal):
     end = time.perf_counter()
     logger.info(f"[LLM] 完整回复: {full_reply}")
     logger.info(f"[LLM] 总耗时: {end-start:.3f}s")
+    _push_reply(message, full_reply)
     if result:
         # 最后片段也继承标签
         tag_match = re.match(r'^\s*\[([^\[\]]+)\]', result)

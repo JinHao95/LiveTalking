@@ -651,16 +651,34 @@
                 const messagesContainer = $('#chat-messages');
                 const messageClass = type === 'user' ? 'user-message' : 'system-message';
                 const sender = type === 'user' ? '您' : '数字人';
-                
+
                 const messageElement = $(`
                     <div class="asr-text ${messageClass}">
                         ${sender}: ${message}
                     </div>
                 `);
-                
+
                 messagesContainer.append(messageElement);
                 messagesContainer.scrollTop(messagesContainer[0].scrollHeight);
             }
+
+            // 订阅 AI 对话回复 SSE
+            (function initChatReplySSE() {
+                const es = new EventSource('/chat_reply');
+                es.onmessage = function(e) {
+                    try {
+                        const data = JSON.parse(e.data);
+                        if (data.reply) {
+                            addChatMessage(data.reply, 'system');
+                        }
+                    } catch(err) {}
+                };
+                es.onerror = function() {
+                    // 断线后 3 秒自动重连
+                    es.close();
+                    setTimeout(initChatReplySSE, 3000);
+                };
+            })();
 
             // 加载配置信息
             let _currentConfig = {};

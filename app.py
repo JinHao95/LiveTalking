@@ -54,6 +54,25 @@ import logging
 _LOG_BUF: collections.deque = collections.deque(maxlen=200)   # 最近200条
 _LOG_SUBSCRIBERS: list = []                                    # SSE 客户端队列列表
 
+# ── 前端对话回复广播 ───────────────────────────────────────────
+_CHAT_REPLY_SUBSCRIBERS: list = []                             # chat_reply SSE 客户端
+
+def push_chat_reply(user_text: str, ai_text: str):
+    """把 AI 回复推送给所有前端 SSE 订阅者"""
+    msg = json.dumps({"user": user_text, "reply": ai_text}, ensure_ascii=False)
+    dead = []
+    for q in _CHAT_REPLY_SUBSCRIBERS:
+        try:
+            q.put_nowait(msg)
+        except Exception:
+            dead.append(q)
+    for q in dead:
+        try:
+            _CHAT_REPLY_SUBSCRIBERS.remove(q)
+        except ValueError:
+            pass
+# ─────────────────────────────────────────────────────────────
+
 class _FrontendLogHandler(logging.Handler):
     """把 logger 的输出同步转发给前端 SSE 订阅者"""
     def emit(self, record):
@@ -327,6 +346,33 @@ async def record(request):
                 {"code": -1, "msg": str(e)}
             ),
         )
+
+async def chat_reply_stream(request):
+    """SSE 接口：实时推送 AI 对话回复文字到前端"""
+    import asyncio as _asyncio
+    resp = web.StreamResponse(headers={
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',
+    })
+    await resp.prepare(request)
+    q = asyncio.Queue()
+    _CHAT_REPLY_SUBSCRIBERS.append(q)
+    try:
+        while True:
+            try:
+                msg = await _asyncio.wait_for(q.get(), timeout=15)
+                await resp.write(f"data: {msg}\n\n".encode())
+            except _asyncio.TimeoutError:
+                await resp.write(b": heartbeat\n\n")
+    except Exception:
+        pass
+    finally:
+        try:
+            _CHAT_REPLY_SUBSCRIBERS.remove(q)
+        except ValueError:
+            pass
+    return resp
 
 async def log_stream(request):
     """SSE 接口：实时推送后端日志到前端"""
@@ -624,6 +670,7 @@ if __name__ == '__main__':
     appasync.router.add_post("/config", post_config)
     appasync.router.add_post("/tts_preview", tts_preview)
     appasync.router.add_get("/logs", log_stream)
+    appasync.router.add_get("/chat_reply", chat_reply_stream)
     appasync.router.add_static('/',path='web')
 
     # Configure default CORS settings.
